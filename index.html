@@ -13,6 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
 :root {
   --bg:#0f0f13;--bg2:#17171e;--bg3:#1e1e28;
@@ -630,27 +631,7 @@ function cleanLabel(raw){
   return s.charAt(0).toUpperCase()+s.slice(1).toLowerCase();
 }
 
-function extractTextFromBuffer(buffer){
-  const bytes=new Uint8Array(buffer);
-  // Méthode 1 : extraire les chaînes entre parenthèses (objets string PDF)
-  let raw='';
-  for(let i=0;i<bytes.length;i++){
-    const b=bytes[i];
-    if(b>=32&&b<127)raw+=String.fromCharCode(b);
-    else if(b===10||b===13)raw+='\n';
-  }
-  // Tenter d'extraire le contenu des parenthèses PDF (BT...ET)
-  const parenRe=/\(([^)]{2,80})\)/g;
-  let m;const chunks=[];
-  while((m=parenRe.exec(raw))!==null){
-    const s=m[1].replace(/\\n/g,'\n').replace(/\\r/g,'\n').replace(/\\\(/g,'(').replace(/\\\)/g,')').trim();
-    if(s.length>1)chunks.push(s);
-  }
-  // Si extraction parenthèses insuffisante, utiliser le texte brut ASCII
-  return chunks.length>=10?chunks.join('\n'):raw;
-}
-
-function parsePdf(text){
+function parsePdfText(text){
   const lines=text.split('\n').map(l=>l.trim()).filter(Boolean);
   const results=[];
   const dateRe=/^(\d{2}\/\d{2}\/\d{4})/;
@@ -678,21 +659,51 @@ function parsePdf(text){
   return results;
 }
 
+async function extractPdfText(buffer){
+  // Utilise PDF.js pour extraire le texte réel du PDF BoursoBank
+  const pdfjsLib=window['pdfjs-dist/build/pdf'];
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const pdf=await pdfjsLib.getDocument({data:buffer}).promise;
+  let fullText='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    // Reconstituer les lignes en groupant par position Y
+    const items=content.items;
+    let lastY=null;
+    for(const item of items){
+      const y=item.transform[5];
+      if(lastY!==null&&Math.abs(y-lastY)>2) fullText+='\n';
+      fullText+=item.str;
+      lastY=y;
+    }
+    fullText+='\n';
+  }
+  return fullText;
+}
+
 function handlePdfUpload(e){
   const file=e.target.files?.[0];if(!file)return;
   toast('Analyse en cours...','info');
   const reader=new FileReader();
-  reader.onload=ev=>{
-    let text='';
-    if(file.name.toLowerCase().endsWith('.pdf')||file.type==='application/pdf'){
-      text=extractTextFromBuffer(ev.target.result);
-    }else{
-      text=new TextDecoder('utf-8').decode(ev.target.result);
+  reader.onload=async ev=>{
+    try{
+      let text='';
+      if(file.name.toLowerCase().endsWith('.pdf')||file.type==='application/pdf'){
+        text=await extractPdfText(ev.target.result);
+      }else{
+        text=new TextDecoder('utf-8').decode(ev.target.result);
+      }
+      const rows=parsePdfText(text);
+      if(!rows.length){
+        toast('Aucune dépense détectée dans ce relevé.','warning');
+        return;
+      }
+      importPending=rows.map((r,idx)=>({...r,_id:idx,_excl:false,_dup:state.expenses.some(ex=>ex.date===r.date&&Math.abs(ex.amount-r.amount)<0.01)}));
+      openImport();
+    }catch(err){
+      toast('Erreur lecture PDF. Vérifie que le fichier est un relevé BoursoBank valide.','error');
     }
-    const rows=parsePdf(text);
-    if(!rows.length){toast("Aucune dépense détectée. Essaie d'exporter en CSV depuis BoursoBank.",'warning');return;}
-    importPending=rows.map((r,idx)=>({...r,_id:idx,_excl:false,_dup:state.expenses.some(ex=>ex.date===r.date&&Math.abs(ex.amount-r.amount)<0.01)}));
-    openImport();
   };
   reader.readAsArrayBuffer(file);
   e.target.value='';
