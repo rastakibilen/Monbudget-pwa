@@ -647,6 +647,20 @@ function cleanLabel(raw){
   return s.charAt(0).toUpperCase()+s.slice(1).toLowerCase();
 }
 
+// Charge le worker PDF.js via un Blob same-origin.
+// Les navigateurs interdisent new Worker() sur une URL cross-origin (CDN) : sans ce contournement,
+// PDF.js échoue silencieusement à charger son worker et l'import PDF ne détecte aucune dépense.
+let _pdfWorkerSrcPromise=null;
+function getPdfWorkerSrc(){
+  if(_pdfWorkerSrcPromise)return _pdfWorkerSrcPromise;
+  const cdnUrl='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  _pdfWorkerSrcPromise=fetch(cdnUrl)
+    .then(r=>{if(!r.ok)throw new Error('worker fetch failed');return r.text();})
+    .then(code=>URL.createObjectURL(new Blob([code],{type:'application/javascript'})))
+    .catch(()=>cdnUrl); // dernier recours : URL directe (peut échouer selon le navigateur)
+  return _pdfWorkerSrcPromise;
+}
+
 // Parse les lignes structurées extraites par position (date, libellé, débit)
 function parseStructuredRows(rows){
   const results=[];
@@ -673,9 +687,7 @@ async function extractStructuredRows(buffer){
   if(!pdfjsLib||!pdfjsLib.getDocument){
     throw new Error('PDF.js non chargé');
   }
-  try{
-    pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  }catch(e){}
+  pdfjsLib.GlobalWorkerOptions.workerSrc=await getPdfWorkerSrc();
   const pdf=await pdfjsLib.getDocument({data:buffer}).promise;
   const allRows=[];
 
@@ -760,6 +772,7 @@ function handlePdfUpload(e){
           const structured=await extractStructuredRows(ev.target.result);
           rows=parseStructuredRows(structured);
         }catch(e1){
+          console.error('Import PDF - stratégie 1 (colonnes) échouée :',e1);
           rows=[];
         }
         // Stratégie 2 : si rien trouvé, extraction texte brut via PDF.js
@@ -767,7 +780,9 @@ function handlePdfUpload(e){
           try{
             const txt=await extractPlainText(ev.target.result);
             rows=parseTextLines(txt);
-          }catch(e2){}
+          }catch(e2){
+            console.error('Import PDF - stratégie 2 (texte brut) échouée :',e2);
+          }
         }
       }else{
         const text=new TextDecoder('utf-8').decode(ev.target.result);
@@ -791,7 +806,7 @@ function handlePdfUpload(e){
 async function extractPlainText(buffer){
   const pdfjsLib=window.pdfjsLib||window['pdfjs-dist/build/pdf']||window.pdfjsDistBuildPdf;
   if(!pdfjsLib||!pdfjsLib.getDocument)throw new Error('PDF.js indisponible');
-  try{pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}catch(e){}
+  pdfjsLib.GlobalWorkerOptions.workerSrc=await getPdfWorkerSrc();
   const pdf=await pdfjsLib.getDocument({data:buffer}).promise;
   let out='';
   for(let p=1;p<=pdf.numPages;p++){
